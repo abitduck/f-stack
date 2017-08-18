@@ -87,8 +87,6 @@
 #define MAX_TX_QUEUE_PER_PORT RTE_MAX_ETHPORTS
 #define MAX_RX_QUEUE_PER_PORT 128
 
-#define BITS_PER_HEX 4
-
 #define KNI_MBUF_MAX 2048
 #define KNI_QUEUE_SIZE 2048
 
@@ -147,7 +145,7 @@ struct lcore_conf {
     uint16_t nb_procs;
     uint16_t socket_id;
     uint16_t nb_rx_queue;
-    uint16_t *lcore_proc;
+    uint16_t *proc_lcore;
     struct lcore_rx_queue rx_queue_list[MAX_RX_QUEUE_PER_LCORE];
     uint16_t tx_queue_id[RTE_MAX_ETHPORTS];
     struct mbuf_table tx_mbufs[RTE_MAX_ETHPORTS];
@@ -182,9 +180,10 @@ static struct ff_dpdk_if_context *veth_ctx[RTE_MAX_ETHPORTS];
 extern void ff_hardclock(void);
 
 static void
-freebsd_hardclock_job(__rte_unused struct rte_timer *timer,
+ff_hardclock_job(__rte_unused struct rte_timer *timer,
     __rte_unused void *arg) {
     ff_hardclock();
+    ff_update_current_ts();
 }
 
 struct ff_dpdk_if_context *
@@ -270,77 +269,6 @@ check_all_ports_link_status(void)
 }
 
 static int
-xdigit2val(unsigned char c)
-{
-    int val;
-
-    if (isdigit(c))
-        val = c - '0';
-    else if (isupper(c))
-        val = c - 'A' + 10;
-    else
-        val = c - 'a' + 10;
-    return val;
-}
-
-static int
-parse_lcore_mask(const char *coremask, uint16_t *lcore_proc,
-    uint16_t nb_procs)
-{
-    int i, j, idx = 0;
-    unsigned count = 0;
-    char c;
-    int val;
-
-    if (coremask == NULL)
-        return -1;
-
-    /* Remove all blank characters ahead and after.
-     * Remove 0x/0X if exists.
-     */
-    while (isblank(*coremask))
-        coremask++;
-    if (coremask[0] == '0' && ((coremask[1] == 'x')
-        || (coremask[1] == 'X')))
-        coremask += 2;
-
-    i = strlen(coremask);
-    while ((i > 0) && isblank(coremask[i - 1]))
-        i--;
-
-    if (i == 0)
-        return -1;
-
-    for (i = i - 1; i >= 0 && idx < RTE_MAX_LCORE && count < nb_procs; i--) {
-        c = coremask[i];
-        if (isxdigit(c) == 0) {
-            return -1;
-        }
-        val = xdigit2val(c);
-        for (j = 0; j < BITS_PER_HEX && idx < RTE_MAX_LCORE && count < nb_procs;
-            j++, idx++) {
-            if ((1 << j) & val) {
-                if (!lcore_config[idx].detected) {
-                    RTE_LOG(ERR, EAL, "lcore %u unavailable\n", idx);
-                    return -1;
-                }
-                lcore_proc[count] = idx;
-                count++;
-            }
-        }
-    }
-
-    for (; i >= 0; i--)
-        if (coremask[i] != '0')
-            return -1;
-
-    if (count < nb_procs)
-        return -1;
-
-    return 0;
-}
-
-static int
 init_lcore_conf(void)
 {
     uint8_t nb_ports = rte_eth_dev_count();
@@ -350,17 +278,20 @@ init_lcore_conf(void)
 
     lcore_conf.proc_id = ff_global_cfg.dpdk.proc_id;
     lcore_conf.nb_procs = ff_global_cfg.dpdk.nb_procs;
-    lcore_conf.lcore_proc = rte_zmalloc(NULL,
-        sizeof(uint16_t)*lcore_conf.nb_procs, 0);
-    if (lcore_conf.lcore_proc == NULL) {
-        rte_exit(EXIT_FAILURE, "rte_zmalloc lcore_proc failed\n");
-    }
 
-    int ret = parse_lcore_mask(ff_global_cfg.dpdk.lcore_mask,
-        lcore_conf.lcore_proc, lcore_conf.nb_procs);
-    if (ret < 0) {
-        rte_exit(EXIT_FAILURE, "parse_lcore_mask failed:%s\n",
-            ff_global_cfg.dpdk.lcore_mask);
+    lcore_conf.proc_lcore = rte_zmalloc(NULL,
+        sizeof(uint16_t) * lcore_conf.nb_procs, 0);
+    if (lcore_conf.proc_lcore == NULL) {
+        rte_exit(EXIT_FAILURE, "rte_zmalloc proc_lcore failed\n");
+    }
+    rte_memcpy(lcore_conf.proc_lcore, ff_global_cfg.dpdk.proc_lcore,
+        sizeof(uint16_t) * lcore_conf.nb_procs);
+    uint16_t proc_id;
+    for (proc_id = 0; proc_id < lcore_conf.nb_procs; proc_id++) {
+        uint16_t lcore_id = lcore_conf.proc_lcore[proc_id];
+        if (!lcore_config[lcore_id].detected) {
+            rte_exit(EXIT_FAILURE, "lcore %u unavailable\n", lcore_id);
+        }
     }
 
     uint16_t socket_id = 0;
@@ -426,7 +357,7 @@ init_mem_pool(void)
     int numa_on = ff_global_cfg.dpdk.numa_on;
 
     for (i = 0; i < lcore_conf.nb_procs; i++) {
-        lcore_id = lcore_conf.lcore_proc[i];
+        lcore_id = lcore_conf.proc_lcore[i];
         if (numa_on) {
             socketid = rte_lcore_to_socket_id(lcore_id);
         }
@@ -681,8 +612,10 @@ init_port_start(void)
         port_conf.rx_adv_conf.rss_conf.rss_key_len = 40;
 
         /* Set Rx VLAN stripping */
-        if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_VLAN_STRIP) {
-            port_conf.rxmode.hw_vlan_strip = 1;
+        if (ff_global_cfg.dpdk.vlan_strip) {
+            if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_VLAN_STRIP) {
+                port_conf.rxmode.hw_vlan_strip = 1;
+            }
         }
 
         /* Enable HW CRC stripping */
@@ -773,11 +706,15 @@ init_port_start(void)
         }
     }
 
+    if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
+        check_all_ports_link_status();
+    }
+
     return 0;
 }
 
 static int
-init_freebsd_clock(void)
+init_clock(void)
 {
     rte_timer_subsystem_init();
     uint64_t hz = rte_get_timer_hz();
@@ -786,7 +723,9 @@ init_freebsd_clock(void)
 
     rte_timer_init(&freebsd_clock);
     rte_timer_reset(&freebsd_clock, tsc, PERIODICAL,
-        rte_lcore_id(), &freebsd_hardclock_job, NULL);
+        rte_lcore_id(), &ff_hardclock_job, NULL);
+
+    ff_update_current_ts();
 
     return 0;
 }
@@ -827,9 +766,7 @@ ff_dpdk_init(int argc, char **argv)
         rte_exit(EXIT_FAILURE, "init_port_start failed\n");
     }
 
-    check_all_ports_link_status();
-
-    init_freebsd_clock();
+    init_clock();
 
     return 0;
 }
@@ -927,7 +864,7 @@ process_packets(uint8_t port_id, uint16_t queue_id, struct rte_mbuf **bufs,
                     if(i == queue_id)
                         continue;
 
-                    mbuf_pool = pktmbuf_pool[rte_lcore_to_socket_id(qconf->lcore_proc[i])];
+                    mbuf_pool = pktmbuf_pool[rte_lcore_to_socket_id(qconf->proc_lcore[i])];
                     mbuf_clone = rte_pktmbuf_clone(rtem, mbuf_pool);
                     if(mbuf_clone) {
                         int ret = rte_ring_enqueue(arp_ring[i][port_id], mbuf_clone);
@@ -941,7 +878,7 @@ process_packets(uint8_t port_id, uint16_t queue_id, struct rte_mbuf **bufs,
                 mbuf_pool = pktmbuf_pool[qconf->socket_id];
                 mbuf_clone = rte_pktmbuf_clone(rtem, mbuf_pool);
                 if(mbuf_clone) {
-                    ff_kni_enqueue(port_id, rtem);
+                    ff_kni_enqueue(port_id, mbuf_clone);
                 }
             }
 

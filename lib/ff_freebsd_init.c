@@ -36,6 +36,7 @@
 #include <sys/vmmeter.h>
 #include <sys/cpuset.h>
 #include <sys/sysctl.h>
+#include <sys/filedesc.h>
 
 #include <vm/uma.h>
 #include <vm/uma_int.h>
@@ -111,6 +112,7 @@ ff_freebsd_init(void)
     mutex_init();
     mi_startup();
     sx_init(&proctree_lock, "proctree");
+    ff_fdused_range(ff_global_cfg.freebsd.fd_reserve);
 
     cur = ff_global_cfg.freebsd.sysctl;
     while (cur) {
@@ -118,7 +120,8 @@ ff_freebsd_init(void)
             cur->value, cur->vlen, NULL, 0);
 
         if (error != 0) {
-            printf("kernel_sysctlbyname failed: %s=%s\n", cur->name, cur->str);
+            printf("kernel_sysctlbyname failed: %s=%s, error:%d\n",
+                cur->name, cur->str, error);
         }
 
         cur = cur->next;

@@ -17,6 +17,9 @@
     echo 1024 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
     mkdir /mnt/huge
     mount -t hugetlbfs nodev /mnt/huge
+    
+    # close ASLR; it is necessary in multiple process
+    echo 0 > /proc/sys/kernel/randomize_va_space
 
     # insmod ko
     modprobe uio
@@ -63,7 +66,7 @@
     make
     make install
 
-    # offload NIC
+    # offload NIC（if there is only one NIC，the follow commands must run in a script）
     ifconfig eth0 down
     python /data/f-stack/dpdk/tools/dpdk-devbind.py --bind=igb_uio eth0
 

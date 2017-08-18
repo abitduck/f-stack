@@ -103,16 +103,9 @@ int loop(void *arg)
 
 int main(int argc, char * argv[])
 {
-    char *conf;
-    if (argc < 2) {
-        conf = "./config.ini";
-    } else {
-        conf = argv[1];
-    }
+    ff_init(argc, argv);
 
-    ff_init(conf, argc, argv);
-
-    int sockfd = ff_socket(AF_INET, SOCK_STREAM, 0);
+    sockfd = ff_socket(AF_INET, SOCK_STREAM, 0);
     printf("sockfd:%d\n", sockfd);
     if (sockfd < 0)
         printf("ff_socket failed\n");
